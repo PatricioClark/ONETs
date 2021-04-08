@@ -82,6 +82,7 @@ class DeepONet:
                  activation='relu',
                  adaptive=False,
                  slope_recovery=False,
+                 feature_expansion=None,
                  optimizer=keras.optimizers.Adam(lr=1e-3),
                  norm_in=False,
                  norm_out=False,
@@ -115,7 +116,7 @@ class DeepONet:
             self.kinit  = 'he_normal'
         elif activation=='elu':
             self.act_fn = keras.activations.elu
-            self.kinit  = 'he_normal'
+            self.kinit  = 'glorot_normal'
         elif activation=='selu':
             self.act_fn = keras.activations.selu
             self.kinit  = 'lecun_normal'
@@ -219,17 +220,31 @@ class DeepONet:
                                                 append=True,
                                                 separator=' ')
 
-    def ckpt_cb_creator(self, manager, ckpt, save_freq):
+    def ckpt_cb_creator(self, manager, ckpt, save_freq, early_stopping=False, threshold=np.inf, monitor='val_loss'):
         ''' Create Checkpoint Callback that works like TF manager '''
         class CkptCb(keras.callbacks.Callback):
-            def __init__(self_cb, ckpt):
+            def __init__(self_cb, ckpt, early_stopping, threshold, monitor):
                 super(CkptCb, self_cb).__init__()
-                self_cb.step = ckpt.step
+                self_cb.step     = ckpt.step
+                self_cb.monitor  = monitor
+                self_cb.best_val = np.inf
+                self_cb.threshold = threshold
+                self_cb.early_stopping = early_stopping
+
             def on_epoch_end(self_cb, epoch, logs):
-                if self_cb.step%save_freq==0:
+                current = logs.get(self_cb.monitor)
+
+                # Save
+                if self_cb.step%save_freq==0 and current<self_cb.best_val:
                     manager.save()
+
+                    # Update best_val
+                    if self_cb.early_stopping and current<self_cb.threshold:
+                        self_cb.best_val = current
+
+                # Add step
                 self_cb.step.assign_add(1)
-        return CkptCb(ckpt)
+        return CkptCb(ckpt, early_stopping, threshold, monitor)
 
     def train(self,
               Xf, Xp, Y, W=None,
