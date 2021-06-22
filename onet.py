@@ -39,6 +39,8 @@ class DeepONet:
         depth of branch network
     p : int
         Width of branch and trunk networks
+    dim_out : int
+        Dimension of output. Must be a true divisor of p. Default is 1. 
     dest : str [optional]
         Path for output files.
     activation : str [optional]
@@ -76,6 +78,7 @@ class DeepONet:
                  depth_branch,
                  depth_trunk,
                  p,
+                 dim_out=1,
                  dest='./',
                  regularizer=None,
                  p_drop=0.0,
@@ -93,6 +96,7 @@ class DeepONet:
         # Numbers and dimensions
         self.m            = m
         self.dim_y        = dim_y
+        self.dim_out      = dim_out
         self.depth_branch = depth_branch
         self.depth_trunk  = depth_trunk
         self.width        = p
@@ -175,7 +179,11 @@ class DeepONet:
                 hid_t = keras.layers.Dropout(p_drop)(hid_t)
 
         # Output definition
-        output = keras.layers.Dot(axes=-1)([hid_b, hid_t])
+        if dim_out>1:
+            hid_b = keras.layers.Reshape((dim_out, p//dim_out))(hid_b)
+            hid_t = keras.layers.Reshape((dim_out, p//dim_out))(hid_t)
+        output = keras.layers.Multiply()([hid_b, hid_t])
+        output = tf.reduce_sum(output, axis=2)
         output = BiasLayer()(output)
 
         if norm_out:
@@ -491,11 +499,11 @@ def serialize_example_with_weights(Xf, Xp, Y, W):
     return serialized
 
 # Parse data
-def proto_wrapper(branch_sensors):
+def proto_wrapper(branch_sensors, dim_y, dim_out):
     def parse_proto(example_proto):
         features = {
             'Xf': tf.io.FixedLenFeature([branch_sensors], tf.float32),
-            'Xp': tf.io.FixedLenFeature([2], tf.float32),
+            'Xp': tf.io.FixedLenFeature([dim_y], tf.float32),
             'Y':  tf.io.FixedLenFeature([], tf.float32),
         }
         parsed_features = tf.io.parse_single_example(example_proto, features)
@@ -503,12 +511,12 @@ def proto_wrapper(branch_sensors):
     return parse_proto
 
 # Parse data
-def proto_wrapper_with_weights(branch_sensors):
+def proto_wrapper_with_weights(branch_sensors, dim_y, dim_out):
     def parse_proto(example_proto):
         features = {
             'Xf': tf.io.FixedLenFeature([branch_sensors], tf.float32),
-            'Xp': tf.io.FixedLenFeature([2], tf.float32),
-            'Y':  tf.io.FixedLenFeature([], tf.float32),
+            'Xp': tf.io.FixedLenFeature([dim_y], tf.float32),
+            'Y':  tf.io.FixedLenFeature([dim_out], tf.float32),
             'W':  tf.io.FixedLenFeature([], tf.float32),
         }
         parsed_features = tf.io.parse_single_example(example_proto, features)
@@ -519,7 +527,7 @@ def proto_wrapper_with_weights(branch_sensors):
 
 # Load dataset
 AUTOTUNE = tf.data.experimental.AUTOTUNE
-def load_dataset(filepaths, branch_sensors, batch_size,
+def load_dataset(filepaths, branch_sensors, dim_y, dim_out, batch_size,
                  use_weights=True,
                  preads=1,
                  shuffle_buffer=0):
@@ -534,10 +542,10 @@ def load_dataset(filepaths, branch_sensors, batch_size,
 
     # Parse proto
     if use_weights:
-        dataset = dataset.map(proto_wrapper_with_weights(branch_sensors),
+        dataset = dataset.map(proto_wrapper_with_weights(branch_sensors, dim_y, dim_out),
                               num_parallel_calls=AUTOTUNE)
     else:
-        dataset = dataset.map(proto_wrapper(branch_sensors),
+        dataset = dataset.map(proto_wrapper(branch_sensors, dim_y, dim_out),
                               num_parallel_calls=AUTOTUNE)
 
     # Shuffle, prefetch and batch
