@@ -12,7 +12,7 @@ import tensorflow as tf
 from   tensorflow import keras
 import time
 
-tf.keras.backend.set_floatx('float64')
+tf.keras.backend.set_floatx('float32')
 
 class DeepONet:
     """
@@ -190,6 +190,7 @@ class DeepONet:
         self.model = model
         self.num_trainable_vars = np.sum([np.prod(v.shape)
                                           for v in self.model.trainable_variables])
+        self.num_trainable_vars = tf.cast(self.num_trainable_vars, tf.float32)
 
         # Parameter for dynamic balance
         self.bal_data = tf.Variable(1.0, name='bal_data')
@@ -209,6 +210,7 @@ class DeepONet:
               train_dataset,
               pde,
               baseline_lambda=1.0,
+              alpha=0.0,
               epochs=10,
               verbose=False,
               print_freq=1,
@@ -236,6 +238,10 @@ class DeepONet:
             function must be a list containing all equations.
         baseline_lambda : float [optional]
             Global baseline lambda_data parameter. Default is 1.0.
+        alpha : float [optional]
+            If non-zero, performs adaptive balance of the physics and data part
+            of the loss functions. See comment above for reference. Cannot be
+            set if "ntk_balance" is also set. Default is zero.
         epochs : int [optional]
             Number of epochs to train. Default is 10.
         verbose : bool [optional]
@@ -269,7 +275,7 @@ class DeepONet:
         for ep in range(ep0, ep0+epochs):
 
             # Loop through batches
-            for X, Y, W, ld, lp in train_dataset:
+            for X, Y, W in train_dataset:
                 (loss_data,
                  loss_phys,
                  bal_data) = self.training_step(X, Y, W,
@@ -279,13 +285,23 @@ class DeepONet:
                                                 bal_data,
                                                 alpha)
 
+            # Get validation
+            if valid_dataset is not None:
+                valid = self.validation(valid_dataset, baseline_lambda)
+            else:
+                valid = loss_data
+
             # Print status
             if ep%print_freq==0:
-                outputs = [loss_data.numpy(), loss_phys.numpy()]
-                if valid_dataset is not None:
-                    Y_p
+                status = [loss_data.numpy(), loss_phys.numpy()]
 
-                self.print_status(ep, outputs, verbose=verbose)
+                if valid_dataset is not None:
+                    status.append(valid.numpy())
+
+                if alpha>0.0:
+                    status.append(bal_data.numpy())
+
+                self.print_status(ep, status, verbose=verbose)
 
             # Save progress
             self.ckpt.step.assign_add(1)
@@ -334,7 +350,7 @@ class DeepONet:
             bal_data = (1.0-alpha)*bal_data + alpha*lhat
 
         # Apply gradients
-        gradients = [bal_data*g_data + bal_phys*g_phys
+        gradients = [bal_data*g_data + g_phys
                      for g_data, g_phys in zip(gradients_data, gradients_phys)]
         self.optimizer.apply_gradients(zip(gradients,
                     self.model.trainable_variables))
@@ -342,28 +358,28 @@ class DeepONet:
         return loss_data, loss_phys, bal_data
 
     @tf.function
-    def validation(self, valid_dataset):
-        jj  = 0
-        acc = 0
-        for X, Y, W in valid_data:
+    def validation(self, valid_dataset, l0):
+        jj  = 0.0
+        acc = 0.0
+        for X, Y, W in valid_dataset:
             Y_p = self.model(X, training=True)
             aux = [tf.reduce_mean(W*l0*tf.square(Y[:,ii]-Y_p[:,ii]))
                    for ii in range(self.dim_out)]
             acc += tf.add_n(aux)/self.dim_out
-            jj  + 1
+            jj  += 1.0
 
         return acc/jj
 
-    def print_status(self, ep, output, verbose=False):
+    def print_status(self, ep, status, verbose=False):
         """ Print status function """
 
         # Loss functions
         output_file = open(self.dest + 'output.dat', 'a')
-        print(ep, *loss, file=output_file)
+        print(ep, *status, file=output_file)
         output_file.close()
 
         if verbose:
-            print(ep, f'{loss}')
+            print(ep, *status)
 
 def get_mini_batch(X1, X2, Y, W, idx_arr, batch_size):
     idxs = np.random.choice(idx_arr, batch_size)
