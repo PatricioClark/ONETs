@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
-# Physics-Informed DeepONet general class
+# Physics-Informed DeepONet class
 # Written by Patricio Clark Di Leoni at Johns Hopkins University
 # June 2021
 
@@ -45,6 +45,11 @@ class DeepONet:
         Width of branch and trunk networks
     dim_out : int
         Dimension of output. Must be a true divisor of p. Default is 1. 
+    aux_model : tf.keras.Model [optional]
+        Option to add an auxiliary model as output. If None a dummy constant
+        output is added to the DeepONet. Default is None.
+    aux_coords : list [optional]
+        If using an aux_model, specify which variables of the trunk input are used for it.
     dest : str [optional]
         Path for output files.
     activation : str [optional]
@@ -79,6 +84,8 @@ class DeepONet:
                  depth_trunk,
                  p,
                  dim_out=1,
+                 aux_model=None,
+                 aux_coords=None,
                  dest='./',
                  regularizer=None,
                  p_drop=0.0,
@@ -141,6 +148,15 @@ class DeepONet:
             hid_b = funct
             hid_t = point
 
+        # Auxiliary network
+        if aux_model is not None:
+            aux_coords = [hid_t[:,ii:ii+1] for ii in aux_coords]
+            aux_coords = keras.layers.concatenate(aux_coords)
+            aux_out    = aux_model(aux_coords, training=False)[0]
+        else:
+            cte     = keras.layers.Lambda(lambda x: 0*x[:,0:1]+1)(hid_t)
+            aux_out = keras.layers.Dense(1, use_bias=False)(cte)
+
         # Expand time
         if feature_expansion is not None:
             hid_t = keras.layers.Lambda(feature_expansion)(hid_t)
@@ -174,6 +190,7 @@ class DeepONet:
         output = tf.reduce_sum(output, axis=2)
         output = BiasLayer()(output)
 
+        # Normalize output
         if norm_out:
             if norm_out_type=='z_score':
                 mm = norm_out[0]
@@ -186,7 +203,7 @@ class DeepONet:
             output = keras.layers.Lambda(out_norm)(output)
 
         # Create model
-        model = keras.Model(inputs=[funct, point], outputs=output)
+        model = keras.Model(inputs=[funct, point], outputs=[output, aux_out])
         self.model = model
         self.num_trainable_vars = np.sum([np.prod(v.shape)
                                           for v in self.model.trainable_variables])
@@ -211,6 +228,7 @@ class DeepONet:
               pde,
               baseline_lambda=1.0,
               alpha=0.0,
+              enforce_physics=True,
               epochs=10,
               verbose=False,
               print_freq=1,
@@ -242,6 +260,8 @@ class DeepONet:
             If non-zero, performs adaptive balance of the physics and data part
             of the loss functions. See comment above for reference. Cannot be
             set if "ntk_balance" is also set. Default is zero.
+        enforce_physics : bool [optional]
+            Turn physics on/off. Default is True.
         epochs : int [optional]
             Number of epochs to train. Default is 10.
         verbose : bool [optional]
@@ -283,7 +303,8 @@ class DeepONet:
                                                 baseline_lambda,
                                                 data_mask,
                                                 bal_data,
-                                                alpha)
+                                                alpha,
+                                                enforce_physics)
 
             # Get validation
             if valid_dataset is not None:
@@ -315,10 +336,10 @@ class DeepONet:
 
     @tf.function
     def training_step(self, X, Y, W, pde,
-                      l0, data_mask, bal_data, alpha):
+                      l0, data_mask, bal_data, alpha, enforce_physics):
         with tf.GradientTape(persistent=True) as tape:
             # Data part
-            Y_p = self.model(X, training=True)
+            Y_p = self.model(X, training=True)[0]
             aux = [tf.reduce_mean(
                    W*l0*tf.square(Y[:,ii]-Y_p[:,ii]))
                    for ii in range(self.dim_out)
@@ -326,11 +347,13 @@ class DeepONet:
             loss_data = tf.add_n(aux)/self.dim_out
 
             # Physics part
-            equations = pde(self.model, X)
-            loss_eqs  = [tf.reduce_mean(tf.square(eq))
-                             for eq in equations]
-            loss_phys = tf.add_n(loss_eqs)
-            equations = tf.convert_to_tensor(equations)
+            if enforce_physics:
+                equations = pde(self.model, X)
+                loss_eqs  = [tf.reduce_mean(tf.square(eq))
+                                 for eq in equations]
+                loss_phys = tf.add_n(loss_eqs)
+            else:
+                loss_phys = 1.0
 
         # Calculate gradients of data part
         gradients_data = tape.gradient(loss_data,
@@ -338,20 +361,24 @@ class DeepONet:
                     unconnected_gradients=tf.UnconnectedGradients.ZERO)
 
         # Calculate gradients of physics part
-        gradients_phys = tape.gradient(loss_phys,
-                    self.model.trainable_variables,
-                    unconnected_gradients=tf.UnconnectedGradients.ZERO)
+        if enforce_physics:
+            gradients_phys = tape.gradient(loss_phys,
+                        self.model.trainable_variables,
+                        unconnected_gradients=tf.UnconnectedGradients.ZERO)
 
         # alpha-based dynamic balance
-        if alpha>0.0:
+        if alpha>0.0 and enforce_physics:
             mean_grad_data = get_mean_grad(gradients_data, self.num_trainable_vars)
             mean_grad_phys = get_mean_grad(gradients_phys, self.num_trainable_vars)
             lhat = mean_grad_phys/mean_grad_data
             bal_data = (1.0-alpha)*bal_data + alpha*lhat
 
         # Apply gradients
-        gradients = [bal_data*g_data + g_phys
-                     for g_data, g_phys in zip(gradients_data, gradients_phys)]
+        if enforce_physics:
+            gradients = [bal_data*g_data + g_phys
+                         for g_data, g_phys in zip(gradients_data, gradients_phys)]
+        else:
+            gradients = gradients_data
         self.optimizer.apply_gradients(zip(gradients,
                     self.model.trainable_variables))
 
@@ -362,7 +389,7 @@ class DeepONet:
         jj  = 0.0
         acc = 0.0
         for X, Y, W in valid_dataset:
-            Y_p = self.model(X, training=True)
+            Y_p = self.model(X, training=True)[0]
             aux = [tf.reduce_mean(W*l0*tf.square(Y[:,ii]-Y_p[:,ii]))
                    for ii in range(self.dim_out)]
             acc += tf.add_n(aux)/self.dim_out
