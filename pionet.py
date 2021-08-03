@@ -47,7 +47,7 @@ class DeepONet:
         Dimension of output. Must be a true divisor of p. Default is 1. 
     aux_model : tf.keras.Model [optional]
         Option to add an auxiliary model as output. If None a dummy constant
-        output is added to the DeepONet. Default is None.
+        output is added to the DeepONet. The aux_model is not trained. Default is None.
     aux_coords : list [optional]
         If using an aux_model, specify which variables of the trunk input are used for it.
     dest : str [optional]
@@ -134,6 +134,16 @@ class DeepONet:
         funct = keras.layers.Input(m,     name='funct')
         point = keras.layers.Input(dim_y, name='point')
 
+        # Auxiliary network
+        if aux_model is not None:
+            aux_model.trainable = False
+            aux_coords = [point[:,ii:ii+1] for ii in aux_coords]
+            aux_coords = keras.layers.concatenate(aux_coords)
+            aux_out    = aux_model(aux_coords, training=False)[0]
+        else:
+            cte     = keras.layers.Lambda(lambda x: 0*x[:,0:1]+1)(point)
+            aux_out = keras.layers.Dense(1, use_bias=False)(cte)
+
         # Normalize input
         if norm_in:
             fmin   = norm_in[0][0]
@@ -147,15 +157,6 @@ class DeepONet:
         else:
             hid_b = funct
             hid_t = point
-
-        # Auxiliary network
-        if aux_model is not None:
-            aux_coords = [hid_t[:,ii:ii+1] for ii in aux_coords]
-            aux_coords = keras.layers.concatenate(aux_coords)
-            aux_out    = aux_model(aux_coords, training=False)[0]
-        else:
-            cte     = keras.layers.Lambda(lambda x: 0*x[:,0:1]+1)(hid_t)
-            aux_out = keras.layers.Dense(1, use_bias=False)(cte)
 
         # Expand time
         if feature_expansion is not None:
